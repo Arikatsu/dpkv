@@ -1,4 +1,6 @@
 mod app;
+mod models;
+mod parser;
 
 use eframe::egui;
 
