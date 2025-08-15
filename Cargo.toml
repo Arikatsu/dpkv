@@ -1,0 +1,11 @@
+[package]
+name = "dpkv"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.32.0"
+egui = "0.32.0"
+rfd = "0.15.4"
+zip = "4.3.0"
+simd-json = { version = "0.15.1", features = ["serde_impl"]}
