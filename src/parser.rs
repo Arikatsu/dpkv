@@ -13,17 +13,19 @@ use crate::models::{
 
 pub struct Parser {
     // client: reqwest::Client,
+    file_index: HashMap<String, usize>,
 }
 
 impl Parser {
     pub fn new() -> Self {
         Self {
             // client: reqwest::Client::new(),
+            file_index: HashMap::new(),
         }
     }
 
     pub async fn extract_data<R: Read + std::io::Seek, F>(
-        &self,
+        &mut self,
         mut archive: ZipArchive<R>,
         progress_callback: F,
     ) -> Result<ExtractedData>
@@ -34,9 +36,13 @@ impl Parser {
 
         progress_callback("Analyzing package structure...".to_string());
 
-        let file_names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+        // Build file index: map file name to index
+        self.file_index = (0..archive.len())
+            .map(|i| (archive.by_index(i).unwrap().name().to_string(), i))
             .collect();
+
+        // Use file_names as references to avoid cloning
+        let file_names: Vec<&String> = self.file_index.keys().collect();
 
         let messages_root = self.get_messages_root(&file_names)?;
         let servers_root = self.get_servers_root(&file_names)?;
@@ -134,33 +140,33 @@ impl Parser {
         Ok(extracted_data)
     }
 
-    fn get_messages_root(&self, files: &[String]) -> Result<String> {
+    fn get_messages_root(&self, files: &[&String]) -> Result<String> {
         let regex = Regex::new(r"/c?[0-9]{16,32}/channel\.json$")?;
         let sample = files
             .iter()
-            .find(|f| regex.is_match(f))
+            .find(|f| regex.is_match(f.as_str()))
             .ok_or_else(|| anyhow!("Could not find Messages folder structure"))?;
 
         let segments: Vec<&str> = sample.split('/').collect();
         Ok(segments[..segments.len() - 2].join("/"))
     }
 
-    fn get_servers_root(&self, files: &[String]) -> Result<String> {
+    fn get_servers_root(&self, files: &[&String]) -> Result<String> {
         let regex = Regex::new(r"/[0-9]{16,32}/guild\.json$")?;
         let sample = files
             .iter()
-            .find(|f| regex.is_match(f))
+            .find(|f| regex.is_match(f.as_str()))
             .ok_or_else(|| anyhow!("Could not find Servers folder structure"))?;
 
         let segments: Vec<&str> = sample.split('/').collect();
         Ok(segments[..segments.len() - 2].join("/"))
     }
 
-    fn get_user_root(&self, files: &[String]) -> Result<String> {
+    fn get_user_root(&self, files: &[&String]) -> Result<String> {
         let regex = Regex::new(r"^([^/]+)/user\.json$")?;
         let sample = files
             .iter()
-            .find(|f| regex.is_match(f))
+            .find(|f| regex.is_match(f.as_str()))
             .ok_or_else(|| anyhow!("Could not find User folder structure"))?;
 
         let segments: Vec<&str> = sample.split('/').collect();
@@ -172,22 +178,20 @@ impl Parser {
         archive: &mut ZipArchive<R>,
         path: &str,
     ) -> Result<Option<String>> {
-        for i in 0..archive.len() {
-            let file = archive.by_index(i)?;
-            if file.name() == path {
-                let mut content = String::new();
-                let mut reader = BufReader::new(file);
-                reader.read_to_string(&mut content)?;
+        if let Some(&index) = self.file_index.get(path) {
+            let file = archive.by_index(index)?;
+            let mut content = String::new();
+            let mut reader = BufReader::new(file);
+            reader.read_to_string(&mut content)?;
 
-                let cleaned_content = content.trim_start_matches('\u{FEFF}').trim();
+            let cleaned_content = content.trim_start_matches('\u{FEFF}').trim();
 
-                if cleaned_content.is_empty() {
-                    println!("[debug] Warning: File {} is empty", path);
-                    return Ok(None);
-                }
-
-                return Ok(Some(cleaned_content.to_string()));
+            if cleaned_content.is_empty() {
+                println!("[debug] Warning: File {} is empty", path);
+                return Ok(None);
             }
+
+            return Ok(Some(cleaned_content.to_string()));
         }
         Ok(None)
     }
@@ -508,14 +512,13 @@ impl Parser {
     
     async fn process_analytics<R: Read + std::io::Seek>(
         &self,
-        archive: &mut ZipArchive<R>,
+        _archive: &mut ZipArchive<R>,
         extracted_data: &mut ExtractedData,
-        file_names: &[String],
+        file_names: &[&String],
     ) -> Result<()> {
         let analytics_regex = Regex::new(r"analytics/events-[0-9]{4}-[0-9]{5}-of-[0-9]{5}\.json$")?;
-        let analytics_file = file_names.iter().find(|f| analytics_regex.is_match(f));
-        
-        if let Some(file_name) = analytics_file {
+        let analytics_file = file_names.iter().find(|f| analytics_regex.is_match(f.as_str()));
+        if analytics_file.is_some() {
             // if let Some(_content) = self.read_file(archive, file_name)? {
                 // TODO: Parse the analytics file efficiently
                 extracted_data.open_count = Some(0);
@@ -528,20 +531,13 @@ impl Parser {
                 extracted_data.slash_command_used_count = Some(0);
             // }
         }
-        
         Ok(())
     }
     fn file_exists<R: Read + std::io::Seek>(
         &self,
-        archive: &mut ZipArchive<R>,
+        _archive: &mut ZipArchive<R>,
         path: &str,
     ) -> Result<bool> {
-        for i in 0..archive.len() {
-            let file = archive.by_index(i)?;
-            if file.name() == path {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(self.file_index.contains_key(path))
     }
 }

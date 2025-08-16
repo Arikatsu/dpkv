@@ -81,7 +81,7 @@ impl App {
                         Ok(archive) => {
                             let _ = sender.send(ExtractionMessage::Progress("Analyzing package structure...".to_string()));
 
-                            let parser = Parser::new();
+                            let mut parser = Parser::new();
 
                             // Create progress callback that sends updates through the channel
                             let progress_callback = |msg: String| {
