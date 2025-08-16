@@ -7,19 +7,17 @@ use std::io::{BufReader, Read};
 use zip::ZipArchive;
 
 use crate::models::{
-    Channel, ExtractedData, FavoriteWord, Message, ParsedMessage, 
+    Channel, ExtractedData, FavoriteWord, Message, ParsedMessage,
     Payment, TopChannel, TopDM, User, UserData,
 };
 
 pub struct Parser {
-    // client: reqwest::Client,
     file_index: HashMap<String, usize>,
 }
 
 impl Parser {
     pub fn new() -> Self {
         Self {
-            // client: reqwest::Client::new(),
             file_index: HashMap::new(),
         }
     }
@@ -36,12 +34,10 @@ impl Parser {
 
         progress_callback("Analyzing package structure...".to_string());
 
-        // Build file index: map file name to index
         self.file_index = (0..archive.len())
             .map(|i| (archive.by_index(i).unwrap().name().to_string(), i))
             .collect();
 
-        // Use file_names as references to avoid cloning
         let file_names: Vec<&String> = self.file_index.keys().collect();
 
         let messages_root = self.get_messages_root(&file_names)?;
@@ -61,20 +57,13 @@ impl Parser {
             println!("[debug] Loading user info from: {}", user_path);
             match self.parse_json::<User>(&content) {
                 Ok(mut user) => {
-                    let fetched_user =
-                        self.fetch_user(&user.id)
-                            .await
-                            .unwrap_or_else(|_| UserData {
-                                username: "Unknown".to_string(),
-                                discriminator: 0,
-                                avatar: None,
-                            });
+                    if user.username.is_empty() || user.discriminator == 0 {
+                        let user_data = self.fetch_user(&user.id).await?;
+                        user.username = user_data.username;
+                        user.discriminator = user_data.discriminator;
+                        user.avatar_hash = user_data.avatar;
+                    }
 
-                    user.username = fetched_user.username;
-                    user.discriminator = fetched_user.discriminator;
-                    user.avatar_hash = fetched_user.avatar;
-
-                    // Process payments
                     self.process_payments(&mut extracted_data, &user);
                     extracted_data.user = Some(user);
                 }
@@ -109,8 +98,7 @@ impl Parser {
             &messages_root,
             &messages_index,
             &progress_callback,
-        )
-        .await?;
+        )?;
 
         progress_callback("Loading guild information...".to_string());
 
@@ -131,8 +119,7 @@ impl Parser {
 
         progress_callback("Processing analytics...".to_string());
 
-        self.process_analytics(&mut archive, &mut extracted_data, &file_names)
-            .await?;
+        self.process_analytics(&mut archive, &mut extracted_data, &file_names)?;
 
         progress_callback("Finalizing extraction...".to_string());
 
@@ -277,7 +264,7 @@ impl Parser {
         }
     }
 
-    async fn process_channels<R: Read + std::io::Seek, F>(
+    fn process_channels<R: Read + std::io::Seek, F>(
         &self,
         archive: &mut ZipArchive<R>,
         extracted_data: &mut ExtractedData,
@@ -305,12 +292,12 @@ impl Parser {
 
         let is_old_package = channel_ids.iter().any(|id| {
             let path = format!("{}/{}/channel.json", messages_root, id);
-            self.file_exists(archive, &path).unwrap_or(false)
+            self.file_exists(&path)
         });
 
         let is_old_package_v2 = !channel_ids.iter().any(|id| {
             let path = format!("{}/c{}/messages.json", messages_root, id);
-            self.file_exists(archive, &path).unwrap_or(false)
+            self.file_exists(&path)
         });
 
         println!("[debug] Old package (2021): {}", is_old_package);
@@ -318,7 +305,7 @@ impl Parser {
 
         let mut word_counts: HashMap<String, usize> = HashMap::new();
         let mut channel_message_counts: Vec<(String, usize, String)> = Vec::new();
-        let mut dm_message_counts: Vec<(String, String, usize)> = Vec::new(); 
+        let mut dm_message_counts: Vec<(String, String, usize)> = Vec::new();
 
         for (index, channel_id) in channel_ids.iter().enumerate() {
             if index % (channel_ids.len() / 10 + 1) == 0 {
@@ -329,20 +316,20 @@ impl Parser {
                     channel_id
                 ));
             }
-            
+
             let prefix = if is_old_package { "" } else { "c" };
             let extension = if is_old_package_v2 { "csv" } else { "json" };
-            
+
             let channel_data_path =
                 format!("{}/{}{}/channel.json", messages_root, prefix, channel_id);
             let channel_messages_path = format!(
                 "{}/{}{}/messages.{}",
                 messages_root, prefix, channel_id, extension
             );
-            
+
             let channel_data = self.read_file(archive, &channel_data_path)?;
             let channel_messages_content = self.read_file(archive, &channel_messages_path)?;
-            
+
             if let (Some(data_content), Some(messages_content)) =
                 (channel_data, channel_messages_content)
             {
@@ -356,7 +343,7 @@ impl Parser {
                         continue;
                     }
                 };
-                
+
                 let messages: Vec<ParsedMessage> = if extension == "csv" {
                     self.parse_csv(&messages_content)?
                 } else {
@@ -368,46 +355,48 @@ impl Parser {
                         }
                     }
                 };
-                
+
                 let name = messages_index
                     .get(&channel.id)
-                    .cloned()
-                    .unwrap_or_else(|| channel.id.clone());
-                
+                    .map(|s| s.as_str())
+                    .unwrap_or(&channel.id);
+
                 let is_dm = channel.recipients.as_ref().map_or(false, |r| r.len() == 2);
-                
+
                 let dm_user_id = if is_dm {
                     channel.recipients.as_ref().and_then(|recipients| {
                         extracted_data
                             .user
                             .as_ref()
-                            .and_then(|user| recipients.iter().find(|&id| id != &user.id).cloned())
+                            .and_then(|user| recipients.iter().find(|&id| id != &user.id))
                     })
                 } else {
                     None
-                }; 
-                
+                };
+
+                let mut message_count = 0;
                 for message in &messages {
+                    message_count += 1;
                     extracted_data.character_count += message.length;
+
                     if let Ok(dt) = DateTime::parse_from_rfc3339(&message.timestamp) {
                         extracted_data.hours_values[dt.hour() as usize] += 1;
                     }
+
                     for word in &message.words {
                         if word.len() > 5 {
                             *word_counts.entry(word.clone()).or_insert(0) += 1;
                         }
                     }
-                } 
-                
-                if is_dm {
-                    if let Some(dm_id) = dm_user_id {
-                        dm_message_counts.push((channel.id.clone(), dm_id, messages.len()));
-                    }
-                } else if let Some(guild) = &channel.guild {
-                    channel_message_counts.push((name.clone(), messages.len(), guild.name.clone()));
                 }
 
-                drop(messages);
+                if is_dm {
+                    if let Some(dm_id) = dm_user_id {
+                        dm_message_counts.push((channel.id.clone(), dm_id.clone(), message_count));
+                    }
+                } else if let Some(guild) = &channel.guild {
+                    channel_message_counts.push((name.to_string(), message_count, guild.name.clone()));
+                }
             }
         }
 
@@ -418,9 +407,9 @@ impl Parser {
             .map(|(_, count, _)| *count)
             .sum::<usize>()
             + dm_message_counts
-                .iter()
-                .map(|(_, _, count)| *count)
-                .sum::<usize>();
+            .iter()
+            .map(|(_, _, count)| *count)
+            .sum::<usize>();
 
         // Top channels
         channel_message_counts.sort_by(|a, b| b.1.cmp(&a.1));
@@ -455,62 +444,75 @@ impl Parser {
             .take(10)
             .map(|(word, count)| FavoriteWord { word, count })
             .collect();
-        
+
         Ok(())
     }
-    
+
     fn parse_csv(&self, content: &str) -> Result<Vec<ParsedMessage>> {
         let mut reader = csv::Reader::from_reader(content.as_bytes());
         let mut messages = Vec::new();
-        
+
         for result in reader.deserialize() {
             let record: Message = result?;
             if !record.contents.is_empty() {
+                let words = self
+                    .process_words(&record.contents)
+                    .unwrap_or_default();
+
                 messages.push(ParsedMessage {
                     id: record.id,
                     timestamp: record.timestamp,
                     length: record.contents.len(),
-                    words: record
-                        .contents
-                        .split_whitespace()
-                        .map(|s| s.to_string())
-                        .collect(),
+                    words,
                 });
             }
         }
-        
+
         Ok(messages)
     }
-    
+
     fn parse_json_messages(&self, content: &str) -> Result<Vec<ParsedMessage>> {
         let messages: Vec<Message> = match self.parse_json(content) {
             Ok(m) => m,
             Err(_) => {
-                // Try parsing as a single message object instead of array
                 match self.parse_json::<Message>(content) {
                     Ok(msg) => vec![msg],
                     Err(e) => return Err(e),
                 }
             }
         };
-        
+
         Ok(messages
             .into_iter()
             .filter(|m| !m.contents.is_empty())
-            .map(|m| ParsedMessage {
-                id: m.id,
-                timestamp: m.timestamp,
-                length: m.contents.len(),
-                words: m
-                    .contents
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect(),
+            .map(|m| {
+                let words = self
+                    .process_words(&m.contents)
+                    .unwrap_or_default();
+
+                ParsedMessage {
+                    id: m.id,
+                    timestamp: m.timestamp,
+                    length: m.contents.len(),
+                    words,
+                }
             })
             .collect())
     }
-    
-    async fn process_analytics<R: Read + std::io::Seek>(
+
+    fn process_words(
+        &self,
+        content: &str,
+    ) -> Result<Vec<String>> {
+        let words: Vec<String> = content
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+
+        Ok(words)
+    }
+
+    fn process_analytics<R: Read + std::io::Seek>(
         &self,
         _archive: &mut ZipArchive<R>,
         extracted_data: &mut ExtractedData,
@@ -520,24 +522,21 @@ impl Parser {
         let analytics_file = file_names.iter().find(|f| analytics_regex.is_match(f.as_str()));
         if analytics_file.is_some() {
             // if let Some(_content) = self.read_file(archive, file_name)? {
-                // TODO: Parse the analytics file efficiently
-                extracted_data.open_count = Some(0);
-                extracted_data.notification_count = Some(0);
-                extracted_data.join_voice_channel_count = Some(0);
-                extracted_data.join_call_count = Some(0);
-                extracted_data.add_reaction_count = Some(0);
-                extracted_data.message_edited_count = Some(0);
-                extracted_data.sent_message_count = Some(0);
-                extracted_data.slash_command_used_count = Some(0);
+            // TODO: Parse the analytics file efficiently
+            extracted_data.open_count = Some(0);
+            extracted_data.notification_count = Some(0);
+            extracted_data.join_voice_channel_count = Some(0);
+            extracted_data.join_call_count = Some(0);
+            extracted_data.add_reaction_count = Some(0);
+            extracted_data.message_edited_count = Some(0);
+            extracted_data.sent_message_count = Some(0);
+            extracted_data.slash_command_used_count = Some(0);
             // }
         }
         Ok(())
     }
-    fn file_exists<R: Read + std::io::Seek>(
-        &self,
-        _archive: &mut ZipArchive<R>,
-        path: &str,
-    ) -> Result<bool> {
-        Ok(self.file_index.contains_key(path))
+
+    fn file_exists(&self, path: &str) -> bool {
+        self.file_index.contains_key(path)
     }
 }
