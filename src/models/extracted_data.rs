@@ -1,4 +1,4 @@
-use super::user::{User, UserData};
+use super::user::User;
 use super::channel::{TopChannel, TopDM};
 use super::message::FavoriteWord;
 use super::payment::PaymentInfo;

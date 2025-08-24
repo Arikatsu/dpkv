@@ -63,7 +63,6 @@ impl App {
         let (sender, receiver) = channel::<ExtractionMessage>();
         self.extraction_receiver = Some(receiver);
 
-        // Spawn background thread for extraction
         thread::spawn(move || {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => rt,
@@ -83,7 +82,6 @@ impl App {
 
                             let mut parser = Parser::new();
 
-                            // Create progress callback that sends updates through the channel
                             let progress_callback = |msg: String| {
                                 let _ = sender.send(ExtractionMessage::Progress(msg));
                             };
@@ -149,7 +147,6 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.add_space(200.0);
 
-                // Show spinner
                 ui.spinner();
                 ui.add_space(20.0);
 
@@ -158,19 +155,11 @@ impl App {
 
                 ui.add_space(10.0);
 
-                // Show progress message
                 ui.label(egui::RichText::new(&self.progress_message)
                     .size(14.0)
                     .color(egui::Color32::GRAY));
 
                 ui.add_space(20.0);
-
-                if ui.button("Cancel").clicked() {
-                    self.is_loading = false;
-                    self.extraction_receiver = None;
-                    self.zip_path = None;
-                    self.error_message = None;
-                }
             });
         });
     }
@@ -211,6 +200,19 @@ impl App {
                     // User Information
                     if let Some(user) = &data.user {
                         ui.heading("User Information");
+                        let tex = user.avatar.as_ref().map(|avatar_data| {
+                            let dyn_img = image::load_from_memory(avatar_data).expect("Failed to decode avatar image");
+                            let size = [dyn_img.width() as usize, dyn_img.height() as usize];
+                            let rgba = dyn_img.to_rgba8().into_vec();
+                            let image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+                            ui.ctx().load_texture("user_avatar", image, Default::default())
+                        });
+
+                        if let Some(texture) = tex {
+                            ui.add(egui::Image::new(&texture));
+                        } else if let Some(default_url) = &user.default_avatar_url {
+                            ui.image(default_url);
+                        }
                         ui.label(format!("Username: {}#{}", user.username, user.discriminator));
                         ui.label(format!("User ID: {}", user.id));
                         ui.separator();
@@ -285,7 +287,6 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_visuals(egui::Visuals::dark());
 
-        // Check for extraction progress messages
         self.check_extraction_progress(ctx);
 
         if self.is_loading {

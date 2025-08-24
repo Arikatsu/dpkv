@@ -27,6 +27,24 @@ impl Parser {
         }
         Ok(None)
     }
+    
+    pub(crate) fn read_binary_file<R: Read + std::io::Seek>(
+        &self,
+        archive: &mut ZipArchive<R>,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        if let Some(&index) = self.file_index.get(path) {
+            let mut file = archive.by_index(index)?;
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer)?;
+            if buffer.is_empty() {
+                println!("[debug] Warning: Binary file {} is empty", path);
+                return Ok(None);
+            }
+            return Ok(Some(buffer));
+        }
+        Ok(None)
+    }
 
     pub(crate) fn parse_json<T>(&self, content: &str) -> Result<T>
     where

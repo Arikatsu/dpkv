@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::Read;
 use zip::ZipArchive;
 
-use crate::models::{ExtractedData, Payment, User, UserData};
+use crate::models::{ExtractedData, Payment, User};
 use crate::parser::Parser;
 
 impl Parser {
@@ -24,13 +24,11 @@ impl Parser {
             println!("[debug] Loading user info from: {}", user_path);
 
             if let Ok(mut user) = self.parse_json::<User>(&content) {
-                if user.username.is_empty() || user.discriminator == 0 {
-                    let user_data = self.fetch_user(&user.id).await?;
-                    user.username = user_data.username;
-                    user.discriminator = user_data.discriminator;
-                    user.avatar_hash = user_data.avatar;
-                }
-
+                user.avatar = self.load_user_avatar(archive, user_root)?;
+                user.default_avatar_url = Some(self.get_default_avatar_url(
+                    &user.id,
+                    user.discriminator,
+                ));
                 self.process_payments(extracted_data, &user);
                 extracted_data.user = Some(user);
             } else {
@@ -41,13 +39,39 @@ impl Parser {
         Ok(())
     }
 
-    async fn fetch_user(&self, _user_id: &str) -> Result<UserData> {
-        // TODO: Implement actual user fetching logic
-        Ok(UserData {
-            username: "Unknown".to_string(),
-            discriminator: 0,
-            avatar: None,
-        })
+    fn load_user_avatar<R: Read + std::io::Seek>(
+        &self,
+        archive: &mut ZipArchive<R>,
+        user_root: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let extensions = ["png", "jpeg", "jpg", "gif"];
+
+        for ext in &extensions {
+            let avatar_path = format!("{}/avatar.{}", user_root, ext);
+            if !self.file_exists(&avatar_path) {
+                continue;
+            }
+            if let Some(content) = self.read_binary_file(archive, &avatar_path)? {
+                println!("[debug] Found avatar: {}", avatar_path);
+                return Ok(Some(content));
+            }
+        }
+
+        println!("[debug] No avatar found in {}", user_root);
+        Ok(None)
+    }
+
+    fn get_default_avatar_url(
+        &self,
+        user_id: &str,
+        discriminator: u16
+    ) -> String {
+        let avatar_index = if discriminator == 0 {
+            ((user_id.parse::<u64>().unwrap_or(0) >> 22) % 6) as u16
+        } else {
+            discriminator % 5
+        };
+        format!("https://cdn.discordapp.com/embed/avatars/{}.png", avatar_index)
     }
 
     fn process_payments(&self, extracted_data: &mut ExtractedData, user: &User) {
